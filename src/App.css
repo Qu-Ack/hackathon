@@ -1,65 +1,77 @@
-
 #app {
 	height: 100vh;
 	width: 100vw;
 	display: flex;
 	flex-direction: column;
-	align-items: center;
 	background-color: black;
 	color: white;
-	gap: 2rem;
+	overflow: hidden;
 }
 
 #dashboard_heading {
-	margin-top: 3rem;
+	margin: 2rem 0 1rem 0;
 	font-size: 3em;
-
+	text-align: center;
 }
 
 #dashboard_video_feed_container {
-	width: 100%;
-	height: 50%;
+	flex: 1;
 	display: flex;
+	gap: 1rem;
+	padding: 0 2rem 2rem 2rem;
+	min-height: 0;
 }
-
 
 #dashboard_camera_feed_container {
-	padding: 2em;
-	width:50%;
-	height:100%;
+	width: 50%;
 	display: flex;
 	flex-direction: column;
-}
-
-#dashboard_chat_box {
-	flex: 1;
+	gap: 1rem;
 }
 
 #dashboard_camera_feed {
 	width: 100%;
-	height: 90%;
-	border: 1px solid green;
+	flex: 1;
+	border: 2px solid green;
+	border-radius: 8px;
+	object-fit: contain;
+	background-color: #1a1a1a;
 }
 
 #dashboard_camera_controls {
-	flex: 1;
+	display: flex;
+	flex-wrap: wrap;
 	justify-content: center;
 	align-items: center;
 	gap: 12px;
-	display: flex;
+	padding: 1rem 0;
 }
-
 
 #dashboard_camera_control_btn {
-	width:20%;
-	height: 50%;
 	background-color: black;
-	border: 3px: solid white;
-	padding: 0.3em;
+	border: 2px solid white;
+	padding: 0.5em 1em;
 	color: white;
+	border-radius: 4px;
+	font-size: 0.9em;
+	transition: all 0.2s;
 }
-#dashboard_camera_control_btn:hover {
+
+#dashboard_camera_control_btn:hover:not(:disabled) {
 	background-color: gray;
 	color: black;
 	cursor: pointer;
+}
+
+#dashboard_camera_control_btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+#dashboard_chat_box {
+	flex: 1;
+	border: 2px solid red;
+	border-radius: 8px;
+	background-color: #1a1a1a;
+	overflow: auto;
 }
