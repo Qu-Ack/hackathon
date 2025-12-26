@@ -17,8 +17,11 @@ interface Annotation {
 	frameData?: string;
 }
 
-
-
+interface Direction {
+	id: number;
+	text: string;
+	timestamp: Date;
+}
 
 async function getMediaStream() {
 	try {
@@ -97,33 +100,256 @@ async function onAnswer(answer: RTCSessionDescriptionInit) {
 export default function App() {
 	const localVideo = useRef<HTMLVideoElement | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
+	const chatBoxRef = useRef<HTMLDivElement | null>(null);
+	const audioRef = useRef<HTMLAudioElement | null>(null);
 	const [isBroadcasting, setIsBroadcasting] = useState(false);
 	const [isWatching, setIsWatching] = useState(false);
 	const [isPaused, setIsPaused] = useState(false);
 	const [isDrawing, setIsDrawing] = useState(false);
 	const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
 	const [annotations, setAnnotations] = useState<Annotation[]>([]);
+	const [directions, setDirections] = useState<Direction[]>([]);
+	const [isDirectionsActive, setIsDirectionsActive] = useState(false);
+	const [isListening, setIsListening] = useState(false);
 	const localStreamRef = useRef<MediaStream | null>(null);
+	const directionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
+	const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+	const audioChunksRef = useRef<Blob[]>([]);
+
+	const ELEVEN_LABS_API_KEY = 'sk_1ec99cd9a2ce501decaf27f53c2fb1a0c7edfe3bb9beefa8';
+	const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
+
+	const sampleDirections = [
+		"Turn left at the next intersection",
+		"Continue straight for 500 meters",
+		"Turn right onto Main Street",
+		"Your destination is on the left",
+		"Proceed through the roundabout, taking the second exit",
+		"Make a U-turn when possible"
+	];
+
+	async function textToSpeech(text: string): Promise<void> {
+		try {
+			const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
+				method: 'POST',
+				headers: {
+					'Accept': 'audio/mpeg',
+					'Content-Type': 'application/json',
+					'xi-api-key': ELEVEN_LABS_API_KEY
+				},
+				body: JSON.stringify({
+					text: text,
+					model_id: 'eleven_multilingual_v2',
+					voice_settings: {
+						stability: 0.5,
+						similarity_boost: 0.5
+					}
+				})
+			});
+
+			if (!response.ok) {
+				throw new Error(`ElevenLabs API error: ${response.status}`);
+			}
+
+			const audioBlob = await response.blob();
+			const audioUrl = URL.createObjectURL(audioBlob);
+
+			if (audioRef.current) {
+				audioRef.current.src = audioUrl;
+				audioRef.current.play().catch(err => console.error('Audio playback error:', err));
+			}
+		} catch (err) {
+			console.error('Text-to-speech error:', err);
+		}
+	}
+
+	function startDirections() {
+		setIsDirectionsActive(true);
+		setDirections([]);
+
+		// Clear any existing timeouts
+		directionTimeouts.current.forEach(timeout => clearTimeout(timeout));
+		directionTimeouts.current = [];
+
+		// Schedule directions at intervals
+		sampleDirections.forEach((directionText, index) => {
+			const timeout = setTimeout(() => {
+				const newDirection: Direction = {
+					id: Date.now() + index,
+					text: directionText,
+					timestamp: new Date()
+				};
+
+				setDirections(prev => [...prev, newDirection]);
+				textToSpeech(directionText);
+
+				// Auto-scroll chat box to bottom
+				setTimeout(() => {
+					if (chatBoxRef.current) {
+						chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
+					}
+				}, 100);
+			}, index * 8000); // 8 seconds between each direction
+
+			directionTimeouts.current.push(timeout);
+		});
+	}
+
+	function stopDirections() {
+		setIsDirectionsActive(false);
+		directionTimeouts.current.forEach(timeout => clearTimeout(timeout));
+		directionTimeouts.current = [];
+
+		if (audioRef.current) {
+			audioRef.current.pause();
+			audioRef.current.currentTime = 0;
+		}
+	}
+
+	function clearDirections() {
+		setDirections([]);
+		stopDirections();
+	}
+
+	async function sendAcknowledgment(goalId: string) {
+		try {
+			const response = await fetch("https://your-api-endpoint.com/ack", {
+				method: "POST",
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					goal_id: goalId,
+					ack: "acknowledged"
+				}),
+			});
+
+			if (!response.ok) {
+				console.error("Failed to send acknowledgment:", response);
+				return;
+			}
+
+			console.log("Acknowledgment sent successfully");
+		} catch (err) {
+			console.error("Error sending acknowledgment:", err);
+		}
+	}
+
+	async function speechToText(audioBlob: Blob): Promise<string | null> {
+		try {
+			const formData = new FormData();
+			formData.append("file", audioBlob, "audio.webm");
+			formData.append("model_id", "scribe_v1"); // ✅ REQUIRED
+
+			const response = await fetch(
+				"https://api.elevenlabs.io/v1/speech-to-text",
+				{
+					method: "POST",
+					headers: {
+						"xi-api-key": ELEVEN_LABS_API_KEY,
+					},
+					body: formData,
+				}
+			);
+
+			if (!response.ok) {
+				const errText = await response.text();
+				throw new Error(
+					`ElevenLabs STT error ${response.status}: ${errText}`
+				);
+			}
+
+			const data = await response.json();
+			return data.text ?? null;
+		} catch (err) {
+			console.error("Speech-to-text error:", err);
+			return null;
+		}
+	}
+
+	async function startVoiceRecognition() {
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+			const mediaRecorder = new MediaRecorder(stream);
+			mediaRecorderRef.current = mediaRecorder;
+			audioChunksRef.current = [];
+
+			mediaRecorder.ondataavailable = (event) => {
+				if (event.data.size > 0) {
+					audioChunksRef.current.push(event.data);
+				}
+			};
+
+			mediaRecorder.onstop = async () => {
+				const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+				audioChunksRef.current = [];
+
+				console.log('Processing audio...');
+				const transcription = await speechToText(audioBlob);
+
+				if (transcription) {
+					console.log('Transcription:', transcription);
+					const lowerTranscript = transcription.toLowerCase().trim();
+
+					if (lowerTranscript.includes('yes')) {
+						console.log("'Yes' detected! Sending acknowledgment...");
+						await sendAcknowledgment("goal_123"); 
+					}
+				}
+
+				stream.getTracks().forEach(track => track.stop());
+				setIsListening(false);
+			};
+
+			mediaRecorder.start();
+			setIsListening(true);
+			console.log('Voice recognition started - speak now...');
+
+			// Auto-stop after 5 seconds
+			setTimeout(() => {
+				if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+					mediaRecorderRef.current.stop();
+				}
+			}, 5000);
+
+		} catch (err) {
+			console.error('Microphone access error:', err);
+			alert('Could not access microphone. Please grant permission.');
+			setIsListening(false);
+		}
+	}
+
+	function stopVoiceRecognition() {
+		if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+			mediaRecorderRef.current.stop();
+		}
+		setIsListening(false);
+	}
 
 	async function sendAnnotation() {
 		try {
 			console.log("annotations sent");
-			setAnnotations([]);
 			const resp = await fetch("someurl", {
 				method: "POST",
+				headers: {
+					'Content-Type': 'application/json'
+				},
 				body: JSON.stringify(annotations),
 			})
 
 			if (!resp.ok) {
-				console.log("something happend");
+				console.log("something happened");
 				console.log(resp);
 				return;
 			}
 
+			setAnnotations([]);
 		} catch (err) {
 			console.log(err);
 		}
 	}
+
 	function onConnect() {
 		console.log("connected");
 	}
@@ -243,7 +469,6 @@ export default function App() {
 		const width = currentPos.x - startPos.x;
 		const height = currentPos.y - startPos.y;
 
-		// Only save if rectangle has meaningful size
 		if (Math.abs(width) > 5 && Math.abs(height) > 5) {
 			const frameData = captureFrame();
 			const annotation: Annotation = {
@@ -396,6 +621,14 @@ export default function App() {
 			if (watcherConn) {
 				watcherConn.close();
 			}
+
+			// Clean up timeouts
+			directionTimeouts.current.forEach(timeout => clearTimeout(timeout));
+
+			// Clean up media recorder
+			if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+				mediaRecorderRef.current.stop();
+			}
 		}
 	}, []);
 
@@ -431,6 +664,7 @@ export default function App() {
 
 	return (
 		<div id="app">
+			<audio ref={audioRef} style={{ display: 'none' }} />
 			<h1 id="dashboard_heading"> Dashboard </h1>
 			<div id="dashboard_video_feed_container">
 				<div id="dashboard_camera_feed_container">
@@ -506,6 +740,16 @@ export default function App() {
 						>
 							Send Annotations ({annotations.length})
 						</button>
+						<button
+							id="dashboard_camera_control_btn"
+							onClick={isListening ? stopVoiceRecognition : startVoiceRecognition}
+							style={{
+								background: isListening ? '#ff4444' : '#4CAF50',
+								animation: isListening ? 'pulse 1.5s infinite' : 'none'
+							}}
+						>
+							{isListening ? '🎤 Listening...' : '🎤 Voice Command'}
+						</button>
 					</div>
 					{annotations.length > 0 && (
 						<div style={{ marginTop: '10px', maxHeight: '200px', overflow: 'auto' }}>
@@ -514,7 +758,7 @@ export default function App() {
 								<div key={idx} style={{
 									marginBottom: '8px',
 									padding: '8px',
-									background: '#000010',
+									background: '#333',
 									borderRadius: '4px',
 									fontSize: '12px'
 								}}>
@@ -527,8 +771,119 @@ export default function App() {
 						</div>
 					)}
 				</div>
-				<div id="dashboard_chat_box"></div>
+				<div id="dashboard_chat_box" ref={chatBoxRef}>
+					<div style={{
+						padding: '20px',
+						display: 'flex',
+						flexDirection: 'column',
+						height: '100%'
+					}}>
+						<div style={{
+							display: 'flex',
+							justifyContent: 'space-between',
+							alignItems: 'center',
+							marginBottom: '20px',
+							borderBottom: '2px solid #444',
+							paddingBottom: '10px'
+						}}>
+							<h2 style={{ margin: 0, fontSize: '1.5em' }}>Voice Directions</h2>
+							<div style={{ display: 'flex', gap: '10px' }}>
+								<button
+									id="dashboard_camera_control_btn"
+									onClick={startDirections}
+									disabled={isDirectionsActive}
+									style={{ fontSize: '0.9em' }}
+								>
+									Start Directions
+								</button>
+								<button
+									id="dashboard_camera_control_btn"
+									onClick={stopDirections}
+									disabled={!isDirectionsActive}
+									style={{ fontSize: '0.9em' }}
+								>
+									Stop
+								</button>
+								<button
+									id="dashboard_camera_control_btn"
+									onClick={clearDirections}
+									style={{ fontSize: '0.9em' }}
+								>
+									Clear
+								</button>
+							</div>
+						</div>
+						<div style={{
+							flex: 1,
+							overflowY: 'auto',
+							display: 'flex',
+							flexDirection: 'column',
+							gap: '12px'
+						}}>
+							{directions.length === 0 ? (
+								<div style={{
+									textAlign: 'center',
+									color: '#666',
+									marginTop: '50px',
+									fontSize: '1.1em'
+								}}>
+									Click "Start Directions" to begin navigation
+								</div>
+							) : (
+								directions.map((direction) => (
+									<div
+										key={direction.id}
+										style={{
+											background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+											padding: '16px 20px',
+											borderRadius: '12px',
+											boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
+											animation: 'slideIn 0.3s ease-out',
+											border: '1px solid rgba(255, 255, 255, 0.1)'
+										}}
+									>
+										<div style={{
+											fontSize: '1.1em',
+											fontWeight: '500',
+											marginBottom: '8px',
+											lineHeight: '1.4'
+										}}>
+											📍 {direction.text}
+										</div>
+										<div style={{
+											fontSize: '0.85em',
+											opacity: 0.8,
+											fontStyle: 'italic'
+										}}>
+											{direction.timestamp.toLocaleTimeString()}
+										</div>
+									</div>
+								))
+							)}
+						</div>
+					</div>
+				</div>
 			</div>
+			<style>{`
+				@keyframes slideIn {
+					from {
+						opacity: 0;
+						transform: translateY(-20px);
+					}
+					to {
+						opacity: 1;
+						transform: translateY(0);
+					}
+				}
+				@keyframes pulse {
+					0%, 100% {
+						opacity: 1;
+					}
+					50% {
+						opacity: 0.6;
+					}
+				}
+			`}</style>
 		</div>
 	)
 }
