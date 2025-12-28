@@ -4,8 +4,30 @@ import { socket } from "./socket";
 
 const rtcConfig: RTCConfiguration = {
 	iceServers: [
-		{ urls: "stun:stun.l.google.com:19302" }
-	]
+		{
+			urls: ["stun:stun.relay.metered.ca:80", "stun:global.stun.metered.ca:3478"],
+		},
+		{
+			urls: "turn:global.relay.metered.ca:80",
+			username: "3711b6ade72f58c45a556c24",
+			credential: "Veg3jfxJJVVaHD85",
+		},
+		{
+			urls: "turn:global.relay.metered.ca:80?transport=tcp",
+			username: "3711b6ade72f58c45a556c24",
+			credential: "Veg3jfxJJVVaHD85",
+		},
+		{
+			urls: "turn:global.relay.metered.ca:443",
+			username: "3711b6ade72f58c45a556c24",
+			credential: "Veg3jfxJJVVaHD85",
+		},
+		{
+			urls: "turns:global.relay.metered.ca:443?transport=tcp",
+			username: "3711b6ade72f58c45a556c24",
+			credential: "Veg3jfxJJVVaHD85",
+		},
+	],
 };
 
 interface Annotation {
@@ -29,71 +51,11 @@ async function getMediaStream() {
 			video: {
 				facingMode: 'environment'
 			}
-		})
+		});
 		return stream;
 	} catch (err) {
-		console.log(err);
-	}
-}
-
-let broadcasterConn: RTCPeerConnection | null = null;
-let watcherConn: RTCPeerConnection | null = null;
-
-function iceCandidateHandler(event: RTCPeerConnectionIceEvent) {
-	if (event.candidate) {
-		socket.emit("ice", {
-			role: "broadcaster",
-			candidate: event.candidate,
-		});
-	}
-}
-
-async function onIce({ role, candidate }: { role: string; candidate: RTCIceCandidateInit }) {
-	try {
-		if (role === "broadcaster" && watcherConn) {
-			await watcherConn.addIceCandidate(candidate);
-		}
-
-		if (role === "watcher" && broadcasterConn) {
-			await broadcasterConn.addIceCandidate(candidate);
-		}
-	} catch (err) {
-		console.error("ICE error:", err);
-	}
-}
-
-async function onOffer(offer: RTCSessionDescriptionInit) {
-	console.log('Received offer:', offer);
-
-	watcherConn = new RTCPeerConnection(rtcConfig);
-
-	watcherConn.onicecandidate = e => {
-		if (e.candidate) {
-			socket.emit("ice", {
-				role: "watcher",
-				candidate: e.candidate,
-			});
-		}
-	};
-
-	watcherConn.ontrack = event => {
-		const video = document.getElementById("dashboard_camera_feed") as HTMLVideoElement;
-		if (video) {
-			video.srcObject = event.streams[0];
-		} else {
-			console.error('Video element not found!');
-		}
-	};
-
-	await watcherConn.setRemoteDescription(offer);
-	const answer = await watcherConn.createAnswer();
-	await watcherConn.setLocalDescription(answer);
-	socket.emit("answer", answer);
-}
-
-async function onAnswer(answer: RTCSessionDescriptionInit) {
-	if (broadcasterConn) {
-		await broadcasterConn.setRemoteDescription(answer);
+		console.error('Error getting media stream:', err);
+		throw err;
 	}
 }
 
@@ -102,6 +64,8 @@ export default function App() {
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const chatBoxRef = useRef<HTMLDivElement | null>(null);
 	const audioRef = useRef<HTMLAudioElement | null>(null);
+	const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+	
 	const [isBroadcasting, setIsBroadcasting] = useState(false);
 	const [isWatching, setIsWatching] = useState(false);
 	const [isPaused, setIsPaused] = useState(false);
@@ -111,15 +75,16 @@ export default function App() {
 	const [directions, setDirections] = useState<Direction[]>([]);
 	const [isRecording, setIsRecording] = useState(false);
 	const [isListening, setIsListening] = useState(false);
+	const [error, setError] = useState<string>('');
+	
 	const localStreamRef = useRef<MediaStream | null>(null);
-	//const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-	//const videoChunksRef = useRef<Blob[]>([]);
 	const audioChunksRef = useRef<Blob[]>([]);
-	const recordingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+	const watcherPCRef = useRef<RTCPeerConnection | null>(null);
 
 	const ELEVEN_LABS_API_KEY = 'sk_1ec99cd9a2ce501decaf27f53c2fb1a0c7edfe3bb9beefa8';
 	const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
-	const MODULE_X_BASE_URL = 'http://192.168.1.9:5000'; 
+	const MODULE_X_BASE_URL = 'http://192.168.1.2:5000'; // Update with your module X URL
 
 	async function textToSpeech(text: string): Promise<void> {
 		try {
@@ -149,14 +114,14 @@ export default function App() {
 
 			if (audioRef.current) {
 				audioRef.current.src = audioUrl;
-				audioRef.current.play().catch(err => console.error('Audio playback error:', err));
+				await audioRef.current.play().catch(err => console.error('Audio playback error:', err));
 			}
 		} catch (err) {
 			console.error('Text-to-speech error:', err);
+			setError('Failed to play audio');
 		}
 	}
 
-	// Capture and send current frame when Module X calls back
 	async function captureAndSendFrame() {
 		if (!localVideo.current) {
 			console.error('No video element available');
@@ -168,8 +133,6 @@ export default function App() {
 			setIsRecording(true);
 
 			const video = localVideo.current;
-
-			// Create canvas to capture frame
 			const canvas = document.createElement('canvas');
 			canvas.width = video.videoWidth;
 			canvas.height = video.videoHeight;
@@ -181,12 +144,9 @@ export default function App() {
 				return;
 			}
 
-			// Draw current video frame to canvas
 			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
 			console.log('Frame captured:', canvas.width, 'x', canvas.height);
 
-			// Convert to blob
 			canvas.toBlob(async (blob) => {
 				if (!blob) {
 					console.error('Failed to create blob from canvas');
@@ -195,15 +155,14 @@ export default function App() {
 				}
 
 				console.log('Image blob created. Size:', blob.size, 'bytes');
-
-				// Send image to Module X
 				await sendImageToModuleX(blob);
 				setIsRecording(false);
-			}, 'image/jpeg', 0.95); // High quality JPEG
+			}, 'image/jpeg', 0.95);
 
 		} catch (err) {
 			console.error('Error capturing frame:', err);
 			setIsRecording(false);
+			setError('Failed to capture frame');
 		}
 	}
 
@@ -211,7 +170,6 @@ export default function App() {
 		try {
 			console.log('Preparing to send image to Module X...');
 			console.log('Image blob size:', imageBlob.size, 'bytes');
-			console.log('Module X URL:', MODULE_X_BASE_URL);
 
 			const formData = new FormData();
 			formData.append('image', imageBlob, 'frame.jpg');
@@ -236,11 +194,10 @@ export default function App() {
 			console.log('Image sent successfully:', result);
 		} catch (err) {
 			console.error('Error sending image to Module X:', err);
-			console.error('Error details:', err);
+			setError('Failed to send image to Module X');
 		}
 	}
 
-	// Listen for callback from Module X via Socket.IO to capture frame
 	useEffect(() => {
 		socket.on('module_x_callback', (data) => {
 			console.log('Received callback from Module X:', data);
@@ -252,7 +209,6 @@ export default function App() {
 		};
 	}, []);
 
-	// Listen for instructions from Module X via Socket.IO
 	useEffect(() => {
 		socket.on('module_x_instruction', (data) => {
 			console.log('Received instruction from Module X:', data);
@@ -268,7 +224,6 @@ export default function App() {
 				setDirections(prev => [...prev, newDirection]);
 				textToSpeech(instruction);
 
-				// Auto-scroll chat box to bottom
 				setTimeout(() => {
 					if (chatBoxRef.current) {
 						chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
@@ -297,12 +252,14 @@ export default function App() {
 
 			if (!response.ok) {
 				console.error("Failed to send acknowledgment:", response);
+				setError('Failed to send acknowledgment');
 				return;
 			}
 
 			console.log("Acknowledgment sent successfully");
 		} catch (err) {
 			console.error("Error sending acknowledgment:", err);
+			setError('Error sending acknowledgment');
 		}
 	}
 
@@ -325,15 +282,14 @@ export default function App() {
 
 			if (!response.ok) {
 				const errText = await response.text();
-				throw new Error(
-					`ElevenLabs STT error ${response.status}: ${errText}`
-				);
+				throw new Error(`ElevenLabs STT error ${response.status}: ${errText}`);
 			}
 
 			const data = await response.json();
 			return data.text ?? null;
 		} catch (err) {
 			console.error("Speech-to-text error:", err);
+			setError('Speech recognition failed');
 			return null;
 		}
 	}
@@ -343,7 +299,7 @@ export default function App() {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
 			const mediaRecorder = new MediaRecorder(stream);
-			const audioRecorderRef = mediaRecorder;
+			mediaRecorderRef.current = mediaRecorder;
 			audioChunksRef.current = [];
 
 			mediaRecorder.ondataavailable = (event) => {
@@ -378,19 +334,22 @@ export default function App() {
 			console.log('Voice recognition started - speak now...');
 
 			setTimeout(() => {
-				if (audioRecorderRef.state === 'recording') {
-					audioRecorderRef.stop();
+				if (mediaRecorder.state === 'recording') {
+					mediaRecorder.stop();
 				}
 			}, 5000);
 
 		} catch (err) {
 			console.error('Microphone access error:', err);
-			alert('Could not access microphone. Please grant permission.');
+			setError('Could not access microphone. Please grant permission.');
 			setIsListening(false);
 		}
 	}
 
 	function stopVoiceRecognition() {
+		if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+			mediaRecorderRef.current.stop();
+		}
 		setIsListening(false);
 	}
 
@@ -398,7 +357,6 @@ export default function App() {
 		try {
 			console.log("Sending annotations to Module X...");
 
-			// Send annotations to Module X to activate it
 			const response = await fetch(`${MODULE_X_BASE_URL}/activate`, {
 				method: "POST",
 				headers: {
@@ -412,16 +370,15 @@ export default function App() {
 
 			if (!response.ok) {
 				console.error("Failed to activate Module X:", response);
+				setError('Failed to activate Module X');
 				return;
 			}
 
 			const result = await response.json();
 			console.log("Module X activated:", result);
 
-			// Clear annotations after sending
 			setAnnotations([]);
 
-			// Show notification
 			const newDirection: Direction = {
 				id: Date.now(),
 				text: "Module X activated - waiting for instructions...",
@@ -431,22 +388,14 @@ export default function App() {
 
 		} catch (err) {
 			console.error("Error sending annotations:", err);
+			setError('Error sending annotations to Module X');
 		}
-	}
-
-	function onConnect() {
-		console.log("connected");
 	}
 
 	function captureFrame(): string | undefined {
 		if (!localVideo.current || !canvasRef.current) return;
 
 		const video = localVideo.current;
-		const canvas = canvasRef.current;
-		const ctx = canvas.getContext('2d');
-
-		if (!ctx) return;
-
 		const tempCanvas = document.createElement('canvas');
 		tempCanvas.width = video.videoWidth;
 		tempCanvas.height = video.videoHeight;
@@ -514,7 +463,6 @@ export default function App() {
 		if (!ctx) return;
 
 		const currentPos = getCanvasCoordinates(e);
-
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 
 		const rect = canvas.getBoundingClientRect();
@@ -621,7 +569,8 @@ export default function App() {
 		try {
 			const stream = await getMediaStream();
 			if (!stream) {
-				throw Error("couldn't obtain user stream");
+				setError("Could not access camera");
+				return;
 			}
 
 			localStreamRef.current = stream;
@@ -629,19 +578,12 @@ export default function App() {
 				localVideo.current.srcObject = stream;
 			}
 
-			broadcasterConn = new RTCPeerConnection(rtcConfig);
-			const videoTracks = stream.getVideoTracks();
-			videoTracks.forEach(track => {
-				broadcasterConn!.addTrack(track, stream);
-			});
-
-			broadcasterConn.onicecandidate = iceCandidateHandler;
-			const offer = await broadcasterConn.createOffer();
-			await broadcasterConn.setLocalDescription(offer);
-			socket.emit("offer", offer);
+			socket.emit("start-broadcast");
 			setIsBroadcasting(true);
+			setError('');
 		} catch (err) {
 			console.error('Error starting broadcast:', err);
+			setError('Failed to start broadcast. Please allow camera access.');
 		}
 	}
 
@@ -654,66 +596,189 @@ export default function App() {
 		if (localVideo.current) {
 			localVideo.current.srcObject = null;
 		}
-		if (broadcasterConn) {
-			broadcasterConn.close();
-			broadcasterConn = null;
-			socket.emit("broadcast_close");
-		}
+
+		peerConnectionsRef.current.forEach(pc => {
+			pc.close();
+		});
+		peerConnectionsRef.current.clear();
+
+		socket.emit("broadcast-ended");
 		setIsBroadcasting(false);
 	}
 
 	function watchBroadcast() {
+		console.log('Requesting to watch broadcast...');
 		socket.emit("watch");
-		setIsWatching(true);
+		setError('');
 	}
 
 	function stopWatching() {
+		console.log('Stopping watch...');
+
 		if (localVideo.current) {
 			localVideo.current.srcObject = null;
 		}
 
-		if (watcherConn) {
-			watcherConn.close();
-			watcherConn = null;
+		if (watcherPCRef.current) {
+			console.log('Closing watcher connection, state:', watcherPCRef.current.connectionState);
+			watcherPCRef.current.close();
+			watcherPCRef.current = null;
 		}
 
+		socket.emit("stop-watching");
 		setIsWatching(false);
 	}
 
-	function onBroadCastClose() {
-		if (localVideo.current) {
-			localVideo.current.srcObject = null;
-		}
-	}
-
 	useEffect(() => {
-		socket.on('connect', onConnect);
-		socket.on('ice', onIce);
-		socket.on('answer', onAnswer);
-		socket.on('offer', onOffer);
-		socket.on('broadcast_close', onBroadCastClose);
+		if (!socket) return;
+
+		const onWatcherJoined = async (watcherId: string) => {
+			if (!localStreamRef.current) {
+				console.error('No local stream available');
+				return;
+			}
+
+			console.log('Watcher joined:', watcherId);
+
+			const pc = new RTCPeerConnection(rtcConfig);
+			peerConnectionsRef.current.set(watcherId, pc);
+
+			localStreamRef.current.getTracks().forEach(track => {
+				pc.addTrack(track, localStreamRef.current!);
+			});
+
+			pc.onicecandidate = e => {
+				if (e.candidate) {
+					socket.emit("ice", { to: watcherId, candidate: e.candidate });
+				}
+			};
+
+			pc.oniceconnectionstatechange = () => {
+				console.log(`ICE state for ${watcherId}:`, pc.iceConnectionState);
+			};
+
+			pc.onconnectionstatechange = () => {
+				console.log(`Connection state for ${watcherId}:`, pc.connectionState);
+			};
+
+			try {
+				const offer = await pc.createOffer();
+				await pc.setLocalDescription(offer);
+				socket.emit("offer", { to: watcherId, offer });
+			} catch (err) {
+				console.error('Error creating offer:', err);
+			}
+		};
+
+		const onIce = async ({ from, candidate }: any) => {
+			try {
+				if (peerConnectionsRef.current.has(from)) {
+					await peerConnectionsRef.current.get(from)!.addIceCandidate(new RTCIceCandidate(candidate));
+				} else if (watcherPCRef.current) {
+					await watcherPCRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+				}
+			} catch (err) {
+				console.error('Error adding ICE candidate:', err);
+			}
+		};
+
+		const onAnswer = async ({ from, answer }: any) => {
+			const pc = peerConnectionsRef.current.get(from);
+			if (pc && pc.signalingState !== "closed") {
+				try {
+					await pc.setRemoteDescription(new RTCSessionDescription(answer));
+				} catch (err) {
+					console.error('Error setting remote description:', err);
+				}
+			}
+		};
+
+		const onOffer = async ({ from, offer }: any) => {
+			console.log('Received offer from:', from);
+
+			if (watcherPCRef.current) {
+				watcherPCRef.current.close();
+			}
+
+			watcherPCRef.current = new RTCPeerConnection(rtcConfig);
+
+			watcherPCRef.current.ontrack = e => {
+				console.log('Received track:', e.track.kind);
+				if (localVideo.current && e.streams[0]) {
+					localVideo.current.srcObject = e.streams[0];
+				}
+			};
+
+			watcherPCRef.current.onicecandidate = e => {
+				if (e.candidate) {
+					socket.emit("ice", { to: from, candidate: e.candidate });
+				}
+			};
+
+			watcherPCRef.current.oniceconnectionstatechange = () => {
+				console.log('Watcher ICE state:', watcherPCRef.current?.iceConnectionState);
+			};
+
+			watcherPCRef.current.onconnectionstatechange = () => {
+				console.log('Watcher connection state:', watcherPCRef.current?.connectionState);
+			};
+
+			try {
+				await watcherPCRef.current.setRemoteDescription(new RTCSessionDescription(offer));
+				const answer = await watcherPCRef.current.createAnswer();
+				await watcherPCRef.current.setLocalDescription(answer);
+				socket.emit("answer", { to: from, answer });
+				setIsWatching(true);
+			} catch (err) {
+				console.error('Error handling offer:', err);
+				setError('Failed to connect to broadcast');
+			}
+		};
+
+		const onBroadcastEnded = () => {
+			console.log('Broadcast ended');
+			if (watcherPCRef.current) {
+				watcherPCRef.current.close();
+				watcherPCRef.current = null;
+			}
+			if (localVideo.current) {
+				localVideo.current.srcObject = null;
+			}
+			setIsWatching(false);
+		};
+
+		const onWatcherLeft = (watcherId: string) => {
+			console.log('Watcher left:', watcherId);
+			const pc = peerConnectionsRef.current.get(watcherId);
+			if (pc) {
+				pc.close();
+				peerConnectionsRef.current.delete(watcherId);
+			}
+		};
+
+		socket.on("watcher-joined", onWatcherJoined);
+		socket.on("answer", onAnswer);
+		socket.on("offer", onOffer);
+		socket.on("ice", onIce);
+		socket.on("broadcast-ended", onBroadcastEnded);
+		socket.on("watcher-left", onWatcherLeft);
 
 		return () => {
-			socket.off("connect", onConnect);
-			socket.off('ice', onIce);
-			socket.off('offer', onOffer);
-			socket.off('answer', onAnswer);
-			socket.off('broadcast_close', onBroadCastClose);
+			socket.off("watcher-joined", onWatcherJoined);
+			socket.off("answer", onAnswer);
+			socket.off("offer", onOffer);
+			socket.off("ice", onIce);
+			socket.off("broadcast-ended", onBroadcastEnded);
+			socket.off("watcher-left", onWatcherLeft);
 
-			if (localStreamRef.current) {
-				localStreamRef.current.getTracks().forEach(track => track.stop());
-			}
-			if (broadcasterConn) {
-				broadcasterConn.close();
-			}
-			if (watcherConn) {
-				watcherConn.close();
-			}
+			peerConnectionsRef.current.forEach(pc => pc.close());
+			peerConnectionsRef.current.clear();
 
-			if (recordingTimeoutRef.current) {
-				clearTimeout(recordingTimeoutRef.current);
+			if (watcherPCRef.current) {
+				watcherPCRef.current.close();
+				watcherPCRef.current = null;
 			}
-		}
+		};
 	}, []);
 
 	useEffect(() => {
@@ -749,7 +814,35 @@ export default function App() {
 	return (
 		<div id="app">
 			<audio ref={audioRef} style={{ display: 'none' }} />
-			<h1 id="dashboard_heading"> Dashboard </h1>
+			<h1 id="dashboard_heading">Dashboard</h1>
+			
+			{error && (
+				<div style={{
+					background: '#ff4444',
+					color: 'white',
+					padding: '12px',
+					margin: '10px',
+					borderRadius: '8px',
+					textAlign: 'center'
+				}}>
+					{error}
+					<button 
+						onClick={() => setError('')}
+						style={{
+							marginLeft: '10px',
+							background: 'white',
+							color: '#ff4444',
+							border: 'none',
+							padding: '4px 12px',
+							borderRadius: '4px',
+							cursor: 'pointer'
+						}}
+					>
+						×
+					</button>
+				</div>
+			)}
+
 			<div id="dashboard_video_feed_container">
 				<div id="dashboard_camera_feed_container">
 					<div style={{ position: 'relative', display: 'inline-block' }}>
@@ -757,8 +850,9 @@ export default function App() {
 							ref={localVideo}
 							id="dashboard_camera_feed"
 							autoPlay
+							playsInline
 							muted
-							style={{ display: 'block' }}
+							style={{ display: 'block', maxWidth: '100%' }}
 						/>
 						<canvas
 							ref={canvasRef}
@@ -790,25 +884,29 @@ export default function App() {
 						)}
 					</div>
 					<div id="dashboard_camera_controls">
-						<button id="dashboard_camera_control_btn"
+						<button 
+							id="dashboard_camera_control_btn"
 							onClick={startBroadcast}
 							disabled={isBroadcasting}
 						>
 							Start Broadcasting
 						</button>
-						<button id="dashboard_camera_control_btn"
+						<button 
+							id="dashboard_camera_control_btn"
 							onClick={stopBroadcast}
 							disabled={!isBroadcasting}
 						>
 							Stop Broadcast
 						</button>
-						<button id="dashboard_camera_control_btn"
+						<button 
+							id="dashboard_camera_control_btn"
 							onClick={watchBroadcast}
 							disabled={isWatching || isBroadcasting}
 						>
 							Watch Broadcast
 						</button>
-						<button id="dashboard_camera_control_btn"
+						<button 
+							id="dashboard_camera_control_btn"
 							onClick={stopWatching}
 							disabled={!isWatching}
 						>
@@ -820,7 +918,8 @@ export default function App() {
 						>
 							Pause
 						</button>
-						<button id="dashboard_camera_control_btn"
+						<button 
+							id="dashboard_camera_control_btn"
 							onClick={onResume}
 						>
 							Resume
@@ -948,5 +1047,5 @@ export default function App() {
 				</div>
 			</div>
 		</div>
-	)
+	);
 }
