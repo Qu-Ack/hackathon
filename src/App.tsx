@@ -109,24 +109,17 @@ export default function App() {
 	const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
 	const [annotations, setAnnotations] = useState<Annotation[]>([]);
 	const [directions, setDirections] = useState<Direction[]>([]);
-	const [isDirectionsActive, setIsDirectionsActive] = useState(false);
+	const [isRecording, setIsRecording] = useState(false);
 	const [isListening, setIsListening] = useState(false);
 	const localStreamRef = useRef<MediaStream | null>(null);
-	const directionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
-	const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+	//const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+	//const videoChunksRef = useRef<Blob[]>([]);
 	const audioChunksRef = useRef<Blob[]>([]);
+	const recordingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const ELEVEN_LABS_API_KEY = 'sk_1ec99cd9a2ce501decaf27f53c2fb1a0c7edfe3bb9beefa8';
 	const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
-
-	const sampleDirections = [
-		"Turn left at the next intersection",
-		"Continue straight for 500 meters",
-		"Turn right onto Main Street",
-		"Your destination is on the left",
-		"Proceed through the roundabout, taking the second exit",
-		"Make a U-turn when possible"
-	];
+	const MODULE_X_BASE_URL = 'http://192.168.1.9:5000'; 
 
 	async function textToSpeech(text: string): Promise<void> {
 		try {
@@ -163,25 +156,117 @@ export default function App() {
 		}
 	}
 
-	function startDirections() {
-		setIsDirectionsActive(true);
-		setDirections([]);
+	// Capture and send current frame when Module X calls back
+	async function captureAndSendFrame() {
+		if (!localVideo.current) {
+			console.error('No video element available');
+			return;
+		}
 
-		// Clear any existing timeouts
-		directionTimeouts.current.forEach(timeout => clearTimeout(timeout));
-		directionTimeouts.current = [];
+		try {
+			console.log('Capturing current frame...');
+			setIsRecording(true);
 
-		// Schedule directions at intervals
-		sampleDirections.forEach((directionText, index) => {
-			const timeout = setTimeout(() => {
+			const video = localVideo.current;
+
+			// Create canvas to capture frame
+			const canvas = document.createElement('canvas');
+			canvas.width = video.videoWidth;
+			canvas.height = video.videoHeight;
+			const ctx = canvas.getContext('2d');
+
+			if (!ctx) {
+				console.error('Could not get canvas context');
+				setIsRecording(false);
+				return;
+			}
+
+			// Draw current video frame to canvas
+			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+			console.log('Frame captured:', canvas.width, 'x', canvas.height);
+
+			// Convert to blob
+			canvas.toBlob(async (blob) => {
+				if (!blob) {
+					console.error('Failed to create blob from canvas');
+					setIsRecording(false);
+					return;
+				}
+
+				console.log('Image blob created. Size:', blob.size, 'bytes');
+
+				// Send image to Module X
+				await sendImageToModuleX(blob);
+				setIsRecording(false);
+			}, 'image/jpeg', 0.95); // High quality JPEG
+
+		} catch (err) {
+			console.error('Error capturing frame:', err);
+			setIsRecording(false);
+		}
+	}
+
+	async function sendImageToModuleX(imageBlob: Blob) {
+		try {
+			console.log('Preparing to send image to Module X...');
+			console.log('Image blob size:', imageBlob.size, 'bytes');
+			console.log('Module X URL:', MODULE_X_BASE_URL);
+
+			const formData = new FormData();
+			formData.append('image', imageBlob, 'frame.jpg');
+			formData.append('timestamp', new Date().toISOString());
+
+			console.log('Sending image to:', `${MODULE_X_BASE_URL}/image`);
+
+			const response = await fetch(`${MODULE_X_BASE_URL}/image`, {
+				method: 'POST',
+				body: formData
+			});
+
+			console.log('Response status:', response.status);
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.error('Error response:', errorText);
+				throw new Error(`Failed to send image: ${response.status} - ${errorText}`);
+			}
+
+			const result = await response.json();
+			console.log('Image sent successfully:', result);
+		} catch (err) {
+			console.error('Error sending image to Module X:', err);
+			console.error('Error details:', err);
+		}
+	}
+
+	// Listen for callback from Module X via Socket.IO to capture frame
+	useEffect(() => {
+		socket.on('module_x_callback', (data) => {
+			console.log('Received callback from Module X:', data);
+			captureAndSendFrame();
+		});
+
+		return () => {
+			socket.off('module_x_callback');
+		};
+	}, []);
+
+	// Listen for instructions from Module X via Socket.IO
+	useEffect(() => {
+		socket.on('module_x_instruction', (data) => {
+			console.log('Received instruction from Module X:', data);
+			const instruction = data.instruction || data.text;
+
+			if (instruction) {
 				const newDirection: Direction = {
-					id: Date.now() + index,
-					text: directionText,
+					id: Date.now() + Math.random(),
+					text: instruction,
 					timestamp: new Date()
 				};
 
 				setDirections(prev => [...prev, newDirection]);
-				textToSpeech(directionText);
+				textToSpeech(instruction);
 
 				// Auto-scroll chat box to bottom
 				setTimeout(() => {
@@ -189,31 +274,17 @@ export default function App() {
 						chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
 					}
 				}, 100);
-			}, index * 8000); // 8 seconds between each direction
-
-			directionTimeouts.current.push(timeout);
+			}
 		});
-	}
 
-	function stopDirections() {
-		setIsDirectionsActive(false);
-		directionTimeouts.current.forEach(timeout => clearTimeout(timeout));
-		directionTimeouts.current = [];
-
-		if (audioRef.current) {
-			audioRef.current.pause();
-			audioRef.current.currentTime = 0;
-		}
-	}
-
-	function clearDirections() {
-		setDirections([]);
-		stopDirections();
-	}
+		return () => {
+			socket.off('module_x_instruction');
+		};
+	}, []);
 
 	async function sendAcknowledgment(goalId: string) {
 		try {
-			const response = await fetch("https://your-api-endpoint.com/ack", {
+			const response = await fetch(`${MODULE_X_BASE_URL}/ack`, {
 				method: "POST",
 				headers: {
 					'Content-Type': 'application/json'
@@ -239,7 +310,7 @@ export default function App() {
 		try {
 			const formData = new FormData();
 			formData.append("file", audioBlob, "audio.webm");
-			formData.append("model_id", "scribe_v1"); // ✅ REQUIRED
+			formData.append("model_id", "scribe_v1");
 
 			const response = await fetch(
 				"https://api.elevenlabs.io/v1/speech-to-text",
@@ -272,7 +343,7 @@ export default function App() {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
 			const mediaRecorder = new MediaRecorder(stream);
-			mediaRecorderRef.current = mediaRecorder;
+			const audioRecorderRef = mediaRecorder;
 			audioChunksRef.current = [];
 
 			mediaRecorder.ondataavailable = (event) => {
@@ -294,7 +365,7 @@ export default function App() {
 
 					if (lowerTranscript.includes('yes')) {
 						console.log("'Yes' detected! Sending acknowledgment...");
-						await sendAcknowledgment("goal_123"); 
+						await sendAcknowledgment("goal_123");
 					}
 				}
 
@@ -306,10 +377,9 @@ export default function App() {
 			setIsListening(true);
 			console.log('Voice recognition started - speak now...');
 
-			// Auto-stop after 5 seconds
 			setTimeout(() => {
-				if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-					mediaRecorderRef.current.stop();
+				if (audioRecorderRef.state === 'recording') {
+					audioRecorderRef.stop();
 				}
 			}, 5000);
 
@@ -321,32 +391,46 @@ export default function App() {
 	}
 
 	function stopVoiceRecognition() {
-		if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-			mediaRecorderRef.current.stop();
-		}
 		setIsListening(false);
 	}
 
 	async function sendAnnotation() {
 		try {
-			console.log("annotations sent");
-			const resp = await fetch("someurl", {
+			console.log("Sending annotations to Module X...");
+
+			// Send annotations to Module X to activate it
+			const response = await fetch(`${MODULE_X_BASE_URL}/activate`, {
 				method: "POST",
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify(annotations),
-			})
+				body: JSON.stringify({
+					annotations: annotations,
+					timestamp: new Date().toISOString()
+				}),
+			});
 
-			if (!resp.ok) {
-				console.log("something happened");
-				console.log(resp);
+			if (!response.ok) {
+				console.error("Failed to activate Module X:", response);
 				return;
 			}
 
+			const result = await response.json();
+			console.log("Module X activated:", result);
+
+			// Clear annotations after sending
 			setAnnotations([]);
+
+			// Show notification
+			const newDirection: Direction = {
+				id: Date.now(),
+				text: "Module X activated - waiting for instructions...",
+				timestamp: new Date()
+			};
+			setDirections(prev => [...prev, newDirection]);
+
 		} catch (err) {
-			console.log(err);
+			console.error("Error sending annotations:", err);
 		}
 	}
 
@@ -529,6 +613,10 @@ export default function App() {
 		}
 	}
 
+	function clearDirections() {
+		setDirections([]);
+	}
+
 	async function startBroadcast() {
 		try {
 			const stream = await getMediaStream();
@@ -622,12 +710,8 @@ export default function App() {
 				watcherConn.close();
 			}
 
-			// Clean up timeouts
-			directionTimeouts.current.forEach(timeout => clearTimeout(timeout));
-
-			// Clean up media recorder
-			if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-				mediaRecorderRef.current.stop();
+			if (recordingTimeoutRef.current) {
+				clearTimeout(recordingTimeoutRef.current);
 			}
 		}
 	}, []);
@@ -689,6 +773,21 @@ export default function App() {
 								pointerEvents: isPaused ? 'auto' : 'none'
 							}}
 						/>
+						{isRecording && (
+							<div style={{
+								position: 'absolute',
+								top: '10px',
+								right: '10px',
+								background: '#4CAF50',
+								color: 'white',
+								padding: '8px 16px',
+								borderRadius: '20px',
+								fontWeight: 'bold',
+								animation: 'pulse 1.5s infinite'
+							}}>
+								📸 Capturing Frame
+							</div>
+						)}
 					</div>
 					<div id="dashboard_camera_controls">
 						<button id="dashboard_camera_control_btn"
@@ -786,24 +885,8 @@ export default function App() {
 							borderBottom: '2px solid #444',
 							paddingBottom: '10px'
 						}}>
-							<h2 style={{ margin: 0, fontSize: '1.5em' }}>Voice Directions</h2>
+							<h2 style={{ margin: 0, fontSize: '1.5em' }}>Module X Instructions</h2>
 							<div style={{ display: 'flex', gap: '10px' }}>
-								<button
-									id="dashboard_camera_control_btn"
-									onClick={startDirections}
-									disabled={isDirectionsActive}
-									style={{ fontSize: '0.9em' }}
-								>
-									Start Directions
-								</button>
-								<button
-									id="dashboard_camera_control_btn"
-									onClick={stopDirections}
-									disabled={!isDirectionsActive}
-									style={{ fontSize: '0.9em' }}
-								>
-									Stop
-								</button>
 								<button
 									id="dashboard_camera_control_btn"
 									onClick={clearDirections}
@@ -827,7 +910,7 @@ export default function App() {
 									marginTop: '50px',
 									fontSize: '1.1em'
 								}}>
-									Click "Start Directions" to begin navigation
+									Send annotations to activate Module X
 								</div>
 							) : (
 								directions.map((direction) => (
@@ -864,26 +947,6 @@ export default function App() {
 					</div>
 				</div>
 			</div>
-			<style>{`
-				@keyframes slideIn {
-					from {
-						opacity: 0;
-						transform: translateY(-20px);
-					}
-					to {
-						opacity: 1;
-						transform: translateY(0);
-					}
-				}
-				@keyframes pulse {
-					0%, 100% {
-						opacity: 1;
-					}
-					50% {
-						opacity: 0.6;
-					}
-				}
-			`}</style>
 		</div>
 	)
 }
