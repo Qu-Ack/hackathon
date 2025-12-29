@@ -17,21 +17,21 @@ app.use((req, res, next) => {
 		"http://20.193.158.43:80",
 		"http://20.193.158.43:8080"
 	];
-	
+
 	const origin = req.headers.origin;
 	if (allowedOrigins.includes(origin) || !origin) {
 		res.setHeader('Access-Control-Allow-Origin', origin || '*');
 	}
-	
+
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 	res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 	res.setHeader('Access-Control-Allow-Credentials', 'true');
-	
+
 	// Handle preflight
 	if (req.method === 'OPTIONS') {
 		return res.sendStatus(200);
 	}
-	
+
 	next();
 });
 
@@ -78,27 +78,62 @@ const io = new Server(server, {
 });
 
 let broadcasterId = null;
+let broadcasterSocket = null;
 let watchers = new Set();
 
-// Webhook endpoint for Module X to trigger frame capture
-app.post('/module_x_callback', (req, res) => {
-	console.log('Received callback from Module X:', req.body);
-	
-	if (broadcasterId) {
-		io.to(broadcasterId).emit('module_x_callback', {
-			message: 'Start recording',
-			data: req.body
+
+const getFrame = () => {
+	return new Promise((resolve, reject) => {
+		if (!broadcasterSocket) {
+			return reject(new Error("No broadcaster socket"));
+		}
+
+		broadcasterSocket.emit("module_x_callback");
+
+		broadcasterSocket.once("frame-response", (frame) => {
+			resolve(frame);
 		});
-		res.json({ success: true, message: 'Recording triggered' });
-	} else {
-		res.status(404).json({ success: false, message: 'No active broadcaster' });
+
+		setTimeout(() => {
+			reject(new Error("Frame response timeout"));
+		}, 5000);
+	});
+};
+
+// Webhook endpoint for Module X to trigger frame capture
+app.post('/module_x_callback', async (req, res) => {
+	console.log('Received callback from Module X:', req.body);
+
+	if (!broadcasterSocket) {
+		return res.status(404).json({
+			success: false,
+			message: 'No active broadcaster'
+		});
+	}
+
+	try {
+		const frame = await getFrame();
+		console.log("Received frame from broadcaster");
+
+		res.json({
+			data: frame.imageBase64,
+			isannotated: false,
+			xyxy: [],
+			timestamp: 0,
+		});
+	} catch (err) {
+		console.error(err);
+		res.status(500).json({
+			success: false,
+			error: err.message
+		});
 	}
 });
 
 // Webhook endpoint for Module X to send instructions
 app.post('/module_x_instruction', (req, res) => {
 	console.log('Received instruction from Module X:', req.body);
-	
+
 	if (broadcasterId) {
 		io.to(broadcasterId).emit('module_x_instruction', {
 			instruction: req.body.instruction || req.body.text,
@@ -138,16 +173,17 @@ io.on("connection", (socket) => {
 
 	// Handle broadcaster registration
 	socket.on("start-broadcast", () => {
-		// If there's already a broadcaster, notify the old one
-		if (broadcasterId && broadcasterId !== socket.id) {
-			console.log("Replacing existing broadcaster:", broadcasterId);
-			io.to(broadcasterId).emit("broadcast-ended");
+		if (broadcasterSocket && broadcasterSocket.id !== socket.id) {
+			broadcasterSocket.emit("broadcast-ended");
 		}
-		
+
 		broadcasterId = socket.id;
-		console.log("Broadcaster set:", broadcasterId);
+		broadcasterSocket = socket;
+
 		socket.emit("broadcast-started", { id: socket.id });
 	});
+
+
 
 	// Handle watcher joining
 	socket.on("watch", () => {
@@ -209,10 +245,9 @@ io.on("connection", (socket) => {
 	// Handle broadcast ended
 	socket.on("broadcast-ended", () => {
 		if (socket.id === broadcasterId) {
-			console.log("Broadcast ended by broadcaster:", broadcasterId);
-			socket.broadcast.emit("broadcast-ended");
-			watchers.clear();
 			broadcasterId = null;
+			broadcasterSocket = null;
+			watchers.clear();
 		}
 	});
 

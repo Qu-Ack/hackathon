@@ -65,7 +65,7 @@ export default function App() {
 	const chatBoxRef = useRef<HTMLDivElement | null>(null);
 	const audioRef = useRef<HTMLAudioElement | null>(null);
 	const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-	
+
 	const [isBroadcasting, setIsBroadcasting] = useState(false);
 	const [isWatching, setIsWatching] = useState(false);
 	const [isPaused, setIsPaused] = useState(false);
@@ -76,7 +76,7 @@ export default function App() {
 	const [isRecording, setIsRecording] = useState(false);
 	const [isListening, setIsListening] = useState(false);
 	const [error, setError] = useState<string>('');
-	
+
 	const localStreamRef = useRef<MediaStream | null>(null);
 	const audioChunksRef = useRef<Blob[]>([]);
 	const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -84,7 +84,8 @@ export default function App() {
 
 	const ELEVEN_LABS_API_KEY = 'sk_1ec99cd9a2ce501decaf27f53c2fb1a0c7edfe3bb9beefa8';
 	const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
-	const MODULE_X_BASE_URL = 'http://192.168.1.2:5000'; // Update with your module X URL
+	const MODULE_X_BASE_URL = 'http://192.168.1.2:5000';
+	const DETECTION_MODULE_BASE_URL = "https://sample-url.com:3000/"
 
 	async function textToSpeech(text: string): Promise<void> {
 		try {
@@ -122,6 +123,22 @@ export default function App() {
 		}
 	}
 
+	function blobToBase64(blob: Blob): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onloadend = () => {
+				if (typeof reader.result === "string") {
+					resolve(reader.result);
+				} else {
+					reject(new Error("Failed to convert blob to base64"));
+				}
+			};
+			reader.onerror = reject;
+			reader.readAsDataURL(blob);
+		});
+	}
+
+
 	async function captureAndSendFrame() {
 		if (!localVideo.current) {
 			console.error('No video element available');
@@ -136,67 +153,37 @@ export default function App() {
 			const canvas = document.createElement('canvas');
 			canvas.width = video.videoWidth;
 			canvas.height = video.videoHeight;
-			const ctx = canvas.getContext('2d');
 
+			const ctx = canvas.getContext('2d');
 			if (!ctx) {
-				console.error('Could not get canvas context');
-				setIsRecording(false);
-				return;
+				throw new Error('Could not get canvas context');
 			}
 
 			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-			console.log('Frame captured:', canvas.width, 'x', canvas.height);
 
 			canvas.toBlob(async (blob) => {
 				if (!blob) {
-					console.error('Failed to create blob from canvas');
-					setIsRecording(false);
-					return;
+					throw new Error('Failed to create blob');
 				}
 
-				console.log('Image blob created. Size:', blob.size, 'bytes');
-				await sendImageToModuleX(blob);
+				const base64 = await blobToBase64(blob);
+
+				socket.emit("frame-response", {
+					imageBase64: base64,
+					width: canvas.width,
+					height: canvas.height,
+					format: "image/jpeg"
+				});
+
 				setIsRecording(false);
-			}, 'image/jpeg', 0.95);
+			}, 'image/jpeg', 0.9);
 
 		} catch (err) {
 			console.error('Error capturing frame:', err);
 			setIsRecording(false);
-			setError('Failed to capture frame');
 		}
 	}
 
-	async function sendImageToModuleX(imageBlob: Blob) {
-		try {
-			console.log('Preparing to send image to Module X...');
-			console.log('Image blob size:', imageBlob.size, 'bytes');
-
-			const formData = new FormData();
-			formData.append('image', imageBlob, 'frame.jpg');
-			formData.append('timestamp', new Date().toISOString());
-
-			console.log('Sending image to:', `${MODULE_X_BASE_URL}/image`);
-
-			const response = await fetch(`${MODULE_X_BASE_URL}/image`, {
-				method: 'POST',
-				body: formData
-			});
-
-			console.log('Response status:', response.status);
-
-			if (!response.ok) {
-				const errorText = await response.text();
-				console.error('Error response:', errorText);
-				throw new Error(`Failed to send image: ${response.status} - ${errorText}`);
-			}
-
-			const result = await response.json();
-			console.log('Image sent successfully:', result);
-		} catch (err) {
-			console.error('Error sending image to Module X:', err);
-			setError('Failed to send image to Module X');
-		}
-	}
 
 	useEffect(() => {
 		socket.on('module_x_callback', (data) => {
@@ -357,35 +344,72 @@ export default function App() {
 		try {
 			console.log("Sending annotations to Module X...");
 
-			const response = await fetch(`${MODULE_X_BASE_URL}/activate`, {
+			if (annotations.length == 0) {
+				throw new Error('No annotations to send');
+			}
+
+			const videoWidth = localVideo.current?.videoWidth;
+			const videoHeight = localVideo.current?.videoHeight;
+
+
+			const center_orig_x = (annotations[0].x + annotations[0].width / 2);
+			const center_orig_y = (annotations[0].y + annotations[0].height / 2);
+
+
+			if (videoHeight == null || videoWidth == null) {
+				throw new Error('No annotations to send');
+			}
+
+
+			const norm_x = center_orig_x / videoWidth;
+			const norm_y = center_orig_y / videoHeight;
+
+			const sending_body = {
+				isannotated: true,
+				xyxy: [
+					norm_x,
+					norm_y,
+					annotations[0].width,
+					annotations[0].height,
+				],
+				data: annotations[0].frameData,
+				timestamp: new Date().toISOString(),
+			};
+
+			const response = await fetch(`${DETECTION_MODULE_BASE_URL}/detect`, {
 				method: "POST",
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({
-					annotations: annotations,
-					timestamp: new Date().toISOString()
-				}),
+				body: JSON.stringify(sending_body),
 			});
 
 			if (!response.ok) {
-				console.error("Failed to activate Module X:", response);
-				setError('Failed to activate Module X');
+				console.error("Failed to detect objects", response);
+				setError('Failed to detect');
 				return;
 			}
 
 			const result = await response.json();
-			console.log("Module X activated:", result);
-
+			console.log("Detected objects", result);
 			setAnnotations([]);
 
-			const newDirection: Direction = {
-				id: Date.now(),
-				text: "Module X activated - waiting for instructions...",
-				timestamp: new Date()
-			};
-			setDirections(prev => [...prev, newDirection]);
+			const agent_resp = await fetch(`${MODULE_X_BASE_URL}/activate`, {
+				method: "POST",
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify(sending_body),
+			})
 
+			if (!agent_resp.ok) {
+				console.error("Failed to activate agent");
+				setError("failed to activate agent");
+				return;
+			}
+
+			const x_data = await agent_resp.json();
+			console.log("module x response", x_data);
 		} catch (err) {
 			console.error("Error sending annotations:", err);
 			setError('Error sending annotations to Module X');
@@ -815,7 +839,7 @@ export default function App() {
 		<div id="app">
 			<audio ref={audioRef} style={{ display: 'none' }} />
 			<h1 id="dashboard_heading">Dashboard</h1>
-			
+
 			{error && (
 				<div style={{
 					background: '#ff4444',
@@ -826,7 +850,7 @@ export default function App() {
 					textAlign: 'center'
 				}}>
 					{error}
-					<button 
+					<button
 						onClick={() => setError('')}
 						style={{
 							marginLeft: '10px',
@@ -884,28 +908,28 @@ export default function App() {
 						)}
 					</div>
 					<div id="dashboard_camera_controls">
-						<button 
+						<button
 							id="dashboard_camera_control_btn"
 							onClick={startBroadcast}
 							disabled={isBroadcasting}
 						>
 							Start Broadcasting
 						</button>
-						<button 
+						<button
 							id="dashboard_camera_control_btn"
 							onClick={stopBroadcast}
 							disabled={!isBroadcasting}
 						>
 							Stop Broadcast
 						</button>
-						<button 
+						<button
 							id="dashboard_camera_control_btn"
 							onClick={watchBroadcast}
 							disabled={isWatching || isBroadcasting}
 						>
 							Watch Broadcast
 						</button>
-						<button 
+						<button
 							id="dashboard_camera_control_btn"
 							onClick={stopWatching}
 							disabled={!isWatching}
@@ -918,7 +942,7 @@ export default function App() {
 						>
 							Pause
 						</button>
-						<button 
+						<button
 							id="dashboard_camera_control_btn"
 							onClick={onResume}
 						>
