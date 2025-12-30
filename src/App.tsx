@@ -1,31 +1,32 @@
 import "./App.css"
 import { useRef, useEffect, useState } from 'react';
+import Chatbot from "./Chatbot"
 import { socket } from "./socket";
 
 const rtcConfig: RTCConfiguration = {
 	iceServers: [
 		{
-			urls: ["stun:stun.relay.metered.ca:80", "stun:global.stun.metered.ca:3478"],
+			urls: "stun:stun.relay.metered.ca:80",
 		},
 		{
 			urls: "turn:global.relay.metered.ca:80",
-			username: "3711b6ade72f58c45a556c24",
-			credential: "Veg3jfxJJVVaHD85",
+			username: "09ce2ba8c4725a0e9bf5ebe2",
+			credential: "p7x+Fs1dHdYB+lXC",
 		},
 		{
 			urls: "turn:global.relay.metered.ca:80?transport=tcp",
-			username: "3711b6ade72f58c45a556c24",
-			credential: "Veg3jfxJJVVaHD85",
+			username: "09ce2ba8c4725a0e9bf5ebe2",
+			credential: "p7x+Fs1dHdYB+lXC",
 		},
 		{
 			urls: "turn:global.relay.metered.ca:443",
-			username: "3711b6ade72f58c45a556c24",
-			credential: "Veg3jfxJJVVaHD85",
+			username: "09ce2ba8c4725a0e9bf5ebe2",
+			credential: "p7x+Fs1dHdYB+lXC",
 		},
 		{
 			urls: "turns:global.relay.metered.ca:443?transport=tcp",
-			username: "3711b6ade72f58c45a556c24",
-			credential: "Veg3jfxJJVVaHD85",
+			username: "09ce2ba8c4725a0e9bf5ebe2",
+			credential: "p7x+Fs1dHdYB+lXC",
 		},
 	],
 };
@@ -84,8 +85,8 @@ export default function App() {
 
 	const ELEVEN_LABS_API_KEY = 'sk_1ec99cd9a2ce501decaf27f53c2fb1a0c7edfe3bb9beefa8';
 	const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
-	const MODULE_X_BASE_URL = 'http://192.168.1.2:5000';
-	const DETECTION_MODULE_BASE_URL = "https://sample-url.com:3000/"
+	const MODULE_X_BASE_URL = 'http://localhost:5001';
+	const DETECTION_MODULE_BASE_URL = "http://20.193.158.43:8000"
 
 	async function textToSpeech(text: string): Promise<void> {
 		try {
@@ -365,7 +366,7 @@ export default function App() {
 			const norm_y = center_orig_y / videoHeight;
 
 			const sending_body = {
-				isannotated: true,
+				isannoted: true,
 				xyxy: [
 					norm_x,
 					norm_y,
@@ -373,7 +374,7 @@ export default function App() {
 					annotations[0].height,
 				],
 				data: annotations[0].frameData,
-				timestamp: new Date().toISOString(),
+				timestamp: Math.floor(new Date('2012.08.10').getTime() / 1000)
 			};
 
 			const response = await fetch(`${DETECTION_MODULE_BASE_URL}/detect`, {
@@ -399,7 +400,7 @@ export default function App() {
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify(sending_body),
+				body: JSON.stringify({ content: result.destination.label }),
 			})
 
 			if (!agent_resp.ok) {
@@ -837,6 +838,7 @@ export default function App() {
 
 	return (
 		<div id="app">
+			<Chatbot />
 			<audio ref={audioRef} style={{ display: 'none' }} />
 			<h1 id="dashboard_heading">Dashboard</h1>
 
@@ -1073,3 +1075,5 @@ export default function App() {
 		</div>
 	);
 }
+
+
