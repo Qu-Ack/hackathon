@@ -1,115 +1,35 @@
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from google import genai
-from google.genai import types
 import os
-import json
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+GEMINI_API_KEY = "AIzaSyAg3RpF6RSnM0u2R_BrdPtb3MVj1Y8fmnM"
+os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
-def generate_response(user_message: str):
-    """Generator function that yields chunks of AI response"""
-    client = genai.Client(
-        vertexai=True,
-        api_key=os.environ.get("GOOGLE_CLOUD_API_KEY"),
-    )
-    
-    model = "gemini-3-flash-preview"
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text=user_message)
-            ]
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+client = genai.Client()
+
+class GenerateRequest(BaseModel):
+    content: str
+    model: str = "gemini-2.5-flash"
+
+@app.post("/generate")
+async def generate(req: GenerateRequest):
+    try:
+        response = client.models.generate_content(
+            model=req.model,
+            contents=req.content
         )
-    ]
-    
-    generate_content_config = types.GenerateContentConfig(
-        temperature=1,
-        top_p=0.95,
-        seed=0,
-        max_output_tokens=65535,
-        safety_settings=[
-            types.SafetySetting(
-                category="HARM_CATEGORY_HATE_SPEECH",
-                threshold="OFF"
-            ),
-            types.SafetySetting(
-                category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                threshold="OFF"
-            ),
-            types.SafetySetting(
-                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                threshold="OFF"
-            ),
-            types.SafetySetting(
-                category="HARM_CATEGORY_HARASSMENT",
-                threshold="OFF"
-            )
-        ],
-        system_instruction=[types.Part.from_text(text="Your knowledge cutoff date is January 2025.")],
-        thinking_config=types.ThinkingConfig(
-            thinking_level="HIGH",
-        ),
-    )
-    
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=contents,
-        config=generate_content_config,
-    ):
-        if chunk.text:
-            yield chunk.text
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    """Chat endpoint that returns streaming response"""
-    try:
-        data = request.json
-        message = data.get('message', '')
-        
-        if not message:
-            return jsonify({'error': 'Message is required'}), 400
-        
-        def generate():
-            for chunk in generate_response(message):
-                # Send each chunk as Server-Sent Events
-                yield f"data: {json.dumps({'text': chunk})}\n\n"
-            yield "data: [DONE]\n\n"
-        
-        return Response(generate(), mimetype='text/event-stream')
-    
+        return {"response": response.text}
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/chat/simple', methods=['POST'])
-def chat_simple():
-    """Simple chat endpoint that returns complete response"""
-    try:
-        data = request.json
-        message = data.get('message', '')
-        
-        if not message:
-            return jsonify({'error': 'Message is required'}), 400
-        
-        # Collect all chunks
-        full_response = ""
-        for chunk in generate_response(message):
-            full_response += chunk
-        
-        return jsonify({'response': full_response})
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy'})
-
-if __name__ == '__main__':
-    if not os.environ.get("GOOGLE_CLOUD_API_KEY"):
-        print("Warning: GOOGLE_CLOUD_API_KEY environment variable not set")
-    
-    app.run(debug=True, port=5000)
+        raise HTTPException(status_code=500, detail=str(e))

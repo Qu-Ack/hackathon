@@ -85,8 +85,9 @@ export default function App() {
 
 	const ELEVEN_LABS_API_KEY = 'sk_1ec99cd9a2ce501decaf27f53c2fb1a0c7edfe3bb9beefa8';
 	const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
-	const MODULE_X_BASE_URL = 'http://localhost:5001';
+	const MODULE_X_BASE_URL = 'http://imaginedeployment.centralindia.cloudapp.azure.com:5001';
 	const DETECTION_MODULE_BASE_URL = "http://20.193.158.43:8000"
+	const ACK_MODULE_URL = "http://20.193.158.43:8005"
 
 	async function textToSpeech(text: string): Promise<void> {
 		try {
@@ -227,14 +228,14 @@ export default function App() {
 
 	async function sendAcknowledgment(goalId: string) {
 		try {
-			const response = await fetch(`${MODULE_X_BASE_URL}/ack`, {
+			const response = await fetch(`${ACK_MODULE_URL}/ack`, {
 				method: "POST",
 				headers: {
 					'Content-Type': 'application/json'
 				},
 				body: JSON.stringify({
 					goal_id: goalId,
-					ack: "acknowledged"
+					ack: "confirmed"
 				}),
 			});
 
@@ -395,7 +396,7 @@ export default function App() {
 			console.log("Detected objects", result);
 			setAnnotations([]);
 
-			const agent_resp = await fetch(`${MODULE_X_BASE_URL}/activate`, {
+			const agent_resp = await fetch(`${MODULE_X_BASE_URL}/activate/wait`, {
 				method: "POST",
 				headers: {
 					'Content-Type': 'application/json'
@@ -406,11 +407,11 @@ export default function App() {
 			if (!agent_resp.ok) {
 				console.error("Failed to activate agent");
 				setError("failed to activate agent");
-				return;
+			} else {
+				const x_data = await agent_resp.json();
+				console.log("module x response", x_data);
 			}
 
-			const x_data = await agent_resp.json();
-			console.log("module x response", x_data);
 		} catch (err) {
 			console.error("Error sending annotations:", err);
 			setError('Error sending annotations to Module X');

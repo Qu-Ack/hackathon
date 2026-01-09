@@ -1,84 +1,63 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel
 import os
 from dotenv import load_dotenv
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import ListSortOrder
+import asyncio
 
-# Load environment variables
 load_dotenv()
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+if not os.getenv("AZURE_PROJECT_ENDPOINT") or not os.getenv("AZURE_AGENT_ID"):
+    raise RuntimeError("Missing AZURE_PROJECT_ENDPOINT or AZURE_AGENT_ID in env")
 
-# Check if variables loaded
-if not os.getenv("AZURE_CLIENT_SECRET"):
-    print("Error: Could not find .env file or AZURE_CLIENT_SECRET is missing.")
-    exit()
-
-# Initialize the client using variables from .env
 project = AIProjectClient(
     credential=DefaultAzureCredential(),
     endpoint=os.getenv("AZURE_PROJECT_ENDPOINT")
 )
+agent = project.agents.get_agent(os.getenv("AZURE_AGENT_ID"))
 
-# Get the agent using the variable from .env
-agent_id = os.getenv("AZURE_AGENT_ID")
-agent = project.agents.get_agent(agent_id)
+app = FastAPI()
 
-@app.route('/activate', methods=['POST'])
-def activate():
-    try:
-        # Get content from request body
-        data = request.json
-        content = data.get('content', '')
-        
-        if not content:
-            return jsonify({'error': 'Content is required'}), 400
-        
-        # Create thread
-        thread = project.agents.threads.create()
-        print(f"Created thread, ID: {thread.id}")
-        
-        # Create message with content from request
-        message = project.agents.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=f"your goal is {content}"
-        )
-        
-        # Run agent
-        run = project.agents.runs.create_and_process(
-            thread_id=thread.id,
-            agent_id=agent.id
-        )
-        
-        if run.status == "failed":
-            print(f"Run failed: {run.last_error}")
-            return jsonify({'error': f'Run failed: {run.last_error}'}), 500
-        else:
-            messages = project.agents.messages.list(
-                thread_id=thread.id, 
-                order=ListSortOrder.ASCENDING
-            )
-            
-            # Extract response
-            response_text = ""
-            for message in messages:
-                if message.text_messages:
-                    print(f"{message.role}: {message.text_messages[-1].text.value}")
-                    if message.role == "assistant":
-                        response_text = message.text_messages[-1].text.value
-            
-            return jsonify({
-                'response': response_text,
-                'thread_id': thread.id
-            })
-    
-    except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({'error': str(e)}), 500
+class ActivateRequest(BaseModel):
+    content: str
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+async def run_agent_blocking(thread_id: str):
+    return project.agents.runs.create_and_process(thread_id=thread_id, agent_id=agent.id)
+
+def fetch_assistant_text(thread_id: str) -> str:
+    messages = project.agents.messages.list(thread_id=thread_id, order=ListSortOrder.ASCENDING)
+    response_text = ""
+    for msg in messages:
+        if msg.role == "assistant" and getattr(msg, "text_messages", None):
+            response_text = msg.text_messages[-1].text.value
+    return response_text
+
+@app.post("/activate/background")
+async def activate_background(req: ActivateRequest, bg: BackgroundTasks):
+    if not req.content:
+        raise HTTPException(status_code=400, detail="content is required")
+    thread = project.agents.threads.create()
+    project.agents.messages.create(thread_id=thread.id, role="user", content=req.content)
+    bg.add_task(project.agents.runs.create_and_process, thread_id=thread.id, agent_id=agent.id)
+    return {"status": "started", "thread_id": thread.id}
+
+@app.post("/activate/wait")
+async def activate_wait(req: ActivateRequest):
+    if not req.content:
+        raise HTTPException(status_code=400, detail="content is required")
+    thread = project.agents.threads.create()
+    project.agents.messages.create(thread_id=thread.id, role="user", content=req.content)
+    loop = asyncio.get_running_loop()
+    run = await loop.run_in_executor(None, lambda: project.agents.runs.create_and_process(thread_id=thread.id, agent_id=agent.id))
+    if getattr(run, "status", None) == "failed":
+        raise HTTPException(status_code=500, detail=f"run failed: {getattr(run,'last_error', 'unknown')}")
+    text = await loop.run_in_executor(None, lambda: fetch_assistant_text(thread.id))
+    return {"status": "completed", "thread_id": thread.id, "response": text}
+
+@app.get("/threads/{thread_id}/result")
+def thread_result(thread_id: str):
+    text = fetch_assistant_text(thread_id)
+    return {"thread_id": thread_id, "response": text}
+

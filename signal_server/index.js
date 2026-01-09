@@ -46,6 +46,7 @@ const io = new Server(server, {
 			"http://localhost:5173",
 			"http://127.0.0.1:3001",
 			"http://127.0.0.1:5173",
+			"http://imaginedeployment.centralindia.cloudapp.azure.com:3001",
 			// Local network
 			"http://192.168.1.2:3001",
 			"http://192.168.1.2:5173",
@@ -101,7 +102,7 @@ const getFrame = () => {
 };
 
 // Webhook endpoint for Module X to trigger frame capture
-app.post('/module_x_callback', async (req, res) => {
+app.get('/module_x_callback', async (req, res) => {
 	console.log('Received callback from Module X:', req.body);
 
 	if (!broadcasterSocket) {

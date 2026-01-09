@@ -14,7 +14,7 @@ const Chatbot: React.FC = () => {
 	const [input, setInput] = useState<string>('');
 	const [isLoading, setIsLoading] = useState<boolean>(false);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
-	const API_BASE_URL = 'http://localhost:5000';
+	const API_BASE_URL = 'http://20.193.158.43:8001';
 
 	const scrollToBottom = (): void => {
 		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -35,10 +35,10 @@ const Chatbot: React.FC = () => {
 
 		try {
 			// Using simple endpoint (non-streaming)
-			const response = await fetch(`${API_BASE_URL}/api/chat/simple`, {
+			const response = await fetch(`${API_BASE_URL}/generate`,{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ message: currentInput })
+				body: JSON.stringify({ content: currentInput })
 			});
 
 			if (!response.ok) {
